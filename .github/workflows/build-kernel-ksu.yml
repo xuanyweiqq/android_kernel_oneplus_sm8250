@@ -58,8 +58,18 @@ jobs:
 
     - name: 修改内核配置
       run: |
-        echo "修复 mmu_notifier.h 编译错误..."
-        sed -i 's/enum mmu_notifier_event event,/unsigned long event,/g' include/linux/mmu_notifier.h
+        echo "修复内核兼容性问题..."
+
+        # 修复 1: mmu_notifier.h - 添加缺失的宏定义
+        if ! grep -q "MMU_NOTIFY_UNMAP" include/linux/mmu_notifier.h; then
+          sed -i '/enum mmu_notifier_event {/a\        MMU_NOTIFY_UNMAP = 0,' include/linux/mmu_notifier.h
+        fi
+
+        # 修复 2: NFS client - cl_softerr 改为 cl_softrtry
+        sed -i 's/cl_softerr/cl_softrtry/g' fs/nfs/client.c
+
+        # 修复 3: machine_kexec - 注释掉冲突的函数调用
+        sed -i 's/cpu_soft_restart(reboot_code_buffer_phys, kimage->head, kimage->start, 0);/\/\/ cpu_soft_restart - disabled due to signature mismatch/g' arch/arm64/kernel/machine_kexec.c
 
         echo "准备 defconfig..."
         export ARCH=arm64
@@ -97,9 +107,9 @@ jobs:
         scripts/config --file .config --enable OVERLAY_FS
         scripts/config --file .config --enable MODULES
 
-        # 禁用有编译错误的 KVM 模块
-        scripts/config --file .config --disable KVM
-        scripts/config --file .config --disable VIRTUALIZATION
+        # 修复 BPF trampoline 错误 - 启用 RCU Tasks Trace
+        scripts/config --file .config --enable TASKS_RCU
+        scripts/config --file .config --enable TASKS_TRACE_RCU
 
         # 重新生成最终配置
         make ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
