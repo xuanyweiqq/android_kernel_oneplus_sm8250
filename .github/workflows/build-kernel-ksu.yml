@@ -94,6 +94,10 @@ jobs:
         scripts/config --file .config --enable OVERLAY_FS
         scripts/config --file .config --enable MODULES
 
+        # 禁用有编译错误的 KVM 模块
+        scripts/config --file .config --disable KVM
+        scripts/config --file .config --disable VIRTUALIZATION
+
         # 重新生成最终配置
         make ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
 
