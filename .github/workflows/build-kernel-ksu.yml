@@ -48,9 +48,9 @@ jobs:
         curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
 
         echo "检查 KernelSU 集成状态..."
-        if [ -d "KernelSU" ]; then
+        if [ -d "KernelSU-Next" ] || [ -L "KernelSU" ]; then
           echo "KernelSU Next 集成成功"
-          ls -la KernelSU/
+          ls -la | grep -i kernelsu
         else
           echo "KernelSU Next 集成失败"
           exit 1
