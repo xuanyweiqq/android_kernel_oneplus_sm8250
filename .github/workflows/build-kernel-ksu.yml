@@ -45,14 +45,14 @@ jobs:
     - name: 集成 KernelSU Next
       run: |
         echo "下载 KernelSU Next..."
-        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU_Next/refs/heads/main/kernel/setup.sh" | bash -s main
+        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU_Next/main/kernel/setup.sh" | bash -s main
 
         echo "检查 KernelSU 集成状态..."
         if [ -d "KernelSU" ]; then
-          echo "✓ KernelSU Next 集成成功"
+          echo "KernelSU Next 集成成功"
           ls -la KernelSU/
         else
-          echo "✗ KernelSU Next 集成失败"
+          echo "KernelSU Next 集成失败"
           exit 1
         fi
 
