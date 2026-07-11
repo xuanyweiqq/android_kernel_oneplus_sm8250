@@ -58,6 +58,9 @@ jobs:
 
     - name: 修改内核配置
       run: |
+        echo "修复 mmu_notifier.h 编译错误..."
+        sed -i 's/enum mmu_notifier_event event,/unsigned long event,/g' include/linux/mmu_notifier.h
+
         echo "准备 defconfig..."
         export ARCH=arm64
         export SUBARCH=arm64
