@@ -31,14 +31,14 @@ jobs:
           lzop pngcrush rsync schedtool squashfs-tools \
           xsltproc zip zlib1g-dev python3 python-is-python3
 
-    - name: 下载 Android Clang 21.0.0
+    - name: 下载 Clang 工具链
       run: |
         mkdir -p ~/clang
         cd ~/clang
-        echo "下载 Android Clang 21.0.0..."
-        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r563880.tar.gz
-        tar -xzf clang-r563880.tar.gz
-        rm clang-r563880.tar.gz
+        echo "下载 Proton Clang（兼容 Android Clang）..."
+        wget -q https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz -O proton-clang.tar.gz
+        tar -xzf proton-clang.tar.gz --strip-components=1
+        rm proton-clang.tar.gz
         echo "Clang 版本："
         ./bin/clang --version
 
