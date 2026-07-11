@@ -45,7 +45,7 @@ jobs:
     - name: 集成 KernelSU Next
       run: |
         echo "下载 KernelSU Next..."
-        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU_Next/main/kernel/setup.sh" | bash -s main
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
 
         echo "检查 KernelSU 集成状态..."
         if [ -d "KernelSU" ]; then
