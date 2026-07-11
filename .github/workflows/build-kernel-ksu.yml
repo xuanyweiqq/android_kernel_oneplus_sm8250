@@ -117,11 +117,16 @@ jobs:
           LLVM_IAS=1 \
           CROSS_COMPILE=aarch64-linux-gnu- \
           CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          Image.gz dtbo.img
+          Image.gz dtbs
 
         echo "编译完成，检查产物..."
         ls -lh arch/arm64/boot/Image.gz
-        ls -lh arch/arm64/boot/dtbo.img || echo "dtbo.img 未生成（可能不需要）"
+        if [ -f arch/arm64/boot/dtbo.img ]; then
+          ls -lh arch/arm64/boot/dtbo.img
+        else
+          echo "dtbo.img 未单独生成（已集成在内核中）"
+        fi
+        ls -lh arch/arm64/boot/dts/qcom/*.dtb | head -5
 
     - name: 打包内核为 AnyKernel3 刷机包
       run: |
