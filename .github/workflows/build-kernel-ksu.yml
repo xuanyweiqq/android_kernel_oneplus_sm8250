@@ -1,242 +1,171 @@
-name: Build Kernel with KernelSU Next for OnePlus 8 Pro
+name: Build LineageOS OPlus SM8250 Kernel with KernelSU and cpufake support
 
 on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: '内核版本标签（用于命名）'
+        description: '内核版本标签'
         required: false
         default: 'v1.0'
 
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-23.2
+
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    name: Build Kernel with KernelSU (rsuntk)
+    runs-on: ubuntu-latest
 
     steps:
-    - name: 检出内核源码
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v6
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
       with:
-        ref: lineage-23.2
-        fetch-depth: 1
+        swap-size-gb: 10
 
-    - name: 设置构建环境
+    - name: Setup build kernel environment
       run: |
+        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install -y \
-          bc bison build-essential ccache curl flex \
-          g++-multilib gcc-multilib git gnupg gperf \
-          imagemagick lib32ncurses5-dev lib32readline-dev \
-          lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
-          libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
-          lzop pngcrush rsync schedtool squashfs-tools \
-          xsltproc zip zlib1g-dev python3 python-is-python3
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-    - name: 下载 Clang 工具链
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v5
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    - name: Download & extract Clang-aosp (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
       run: |
-        mkdir -p ~/clang
-        cd ~/clang
-        echo "下载 Proton Clang（兼容 Android Clang）..."
-        wget -q https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz -O proton-clang.tar.gz
-        tar -xzf proton-clang.tar.gz --strip-components=1
-        rm proton-clang.tar.gz
-        echo "Clang 版本："
-        ./bin/clang --version
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir -p clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
 
-    - name: 集成 KernelSU Next (legacy 模式)
+    - name: Download kernel source
       run: |
-        echo "下载 KernelSU Next (legacy 模式用于非 GKI 内核)..."
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-        echo "检查 KernelSU 集成状态..."
-        if [ -d "KernelSU-Next" ] || [ -L "KernelSU" ]; then
-          echo "KernelSU Next 集成成功"
-          ls -la | grep -i kernelsu
+    - name: Set up KernelSU (rsuntk)
+      run: |
+        cd kernel_workspace/android-kernel
+
+        curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh || true
+
+        # KernelSU 配置
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # cpufake 模块必需配置
+        echo "# cpufake module support" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_MODULES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_MODULE_UNLOAD=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_MODVERSIONS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG_FORCE is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG_ALL is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KRETPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 29971)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Check kernel output
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
         else
-          echo "KernelSU Next 集成失败"
+          echo "Kernel output file is empty"
           exit 1
         fi
 
-    - name: 修改内核配置
+    - name: Verify cpufake support in kernel config
       run: |
-        echo "修复内核兼容性问题..."
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+        echo "=== 验证 cpufake 模块支持配置 ==="
+        grep -E "CONFIG_MODULES=|CONFIG_MODULE_SIG|CONFIG_KALLSYMS|CONFIG_KPROBES" .config || true
 
-        # 修复 1: mmu_notifier.h - 彻底修复枚举类型问题
-        # 找到 enum mmu_notifier_event 的定义并添加缺失的值
-        if grep -q "enum mmu_notifier_event" include/linux/mmu_notifier.h; then
-          # 在枚举定义中添加 MMU_NOTIFY_UNMAP
-          sed -i '/^enum mmu_notifier_event {/,/^};/s/^};/\tMMU_NOTIFY_UNMAP = 0,\n};/' include/linux/mmu_notifier.h
-        fi
-
-        # 同时修复函数参数类型不完整的问题
-        sed -i 's/enum mmu_notifier_event event,/unsigned long event,/g' include/linux/mmu_notifier.h
-
-        # 修复 2: NFS client - cl_softerr 改为 cl_softrtry
-        if [ -f fs/nfs/client.c ]; then
-          sed -i 's/cl_softerr/cl_softrtry/g' fs/nfs/client.c
-        fi
-
-        # 修复 3: machine_kexec - 修复函数签名不匹配
-        if [ -f arch/arm64/kernel/machine_kexec.c ]; then
-          # 将4个参数的调用改为2个参数
-          sed -i 's/cpu_soft_restart(reboot_code_buffer_phys, kimage->head, kimage->start, 0);/cpu_soft_restart(reboot_code_buffer_phys, kimage->start);/g' arch/arm64/kernel/machine_kexec.c
-        fi
-
-        echo "准备 defconfig..."
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CLANG_PATH=~/clang
-        export PATH=$CLANG_PATH/bin:$PATH
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-
-        # 使用 defconfig 生成基础配置
-        make ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 defconfig
-
-        echo "修改配置以支持 cpufake 和 KernelSU Next..."
-
-        # cpufake 模块必需配置
-        scripts/config --file .config --enable MODULES
-        scripts/config --file .config --enable MODULE_UNLOAD
-        scripts/config --file .config --enable MODVERSIONS
-        scripts/config --file .config --disable MODULE_SIG
-        scripts/config --file .config --disable MODULE_SIG_FORCE
-        scripts/config --file .config --disable MODULE_SIG_ALL
-        scripts/config --file .config --enable KALLSYMS
-        scripts/config --file .config --enable KALLSYMS_ALL
-
-        # KernelSU Next kprobe 模式必需配置
-        scripts/config --file .config --enable KPROBES
-        scripts/config --file .config --enable KPROBE_EVENTS
-        scripts/config --file .config --enable KRETPROBES
-        scripts/config --file .config --enable KSU_KPROBE_HOOKS
-        scripts/config --file .config --enable KSU
-
-        # KernelSU 其他推荐配置
-        scripts/config --file .config --enable OVERLAY_FS
-        scripts/config --file .config --enable MODULES
-
-        # 修复 BPF trampoline 错误 - 启用 RCU Tasks Trace
-        scripts/config --file .config --enable TASKS_RCU
-        scripts/config --file .config --enable TASKS_TRACE_RCU
-
-        # 重新生成最终配置
-        make ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
-
-        echo "关键配置验证："
-        grep -E "CONFIG_MODULES=|CONFIG_MODULE_SIG|CONFIG_KALLSYMS|CONFIG_KPROBES|CONFIG_KSU" .config | head -25
-
-    - name: 编译内核
+    - name: Prepare AnyKernel3 and package
       run: |
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CLANG_PATH=~/clang
-        export PATH=$CLANG_PATH/bin:$PATH
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-
-        echo "开始编译内核..."
-        make -j$(nproc --all) \
-          ARCH=arm64 \
-          CC=clang \
-          LLVM=1 \
-          LLVM_IAS=1 \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          Image.gz dtbs
-
-        echo "编译完成，检查产物..."
-        ls -lh arch/arm64/boot/Image.gz
-        if [ -f arch/arm64/boot/dtbo.img ]; then
-          ls -lh arch/arm64/boot/dtbo.img
-        else
-          echo "dtbo.img 未单独生成（已集成在内核中）"
-        fi
-        ls -lh arch/arm64/boot/dts/qcom/*.dtb | head -5
-
-    - name: 打包内核为 AnyKernel3 刷机包
-      run: |
-        echo "下载 AnyKernel3..."
+        cd kernel_workspace
         git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+
+        # 更新内核描述
+        sed -i 's/kernel.string=.*/kernel.string=OnePlus 8 Pro KernelSU + cpufake support by ${{ github.actor }}/' AnyKernel3/anykernel.sh
+
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
         cd AnyKernel3
+        zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU-cpufake-${{ github.event.inputs.kernel_version }}.zip ./*
 
-        echo "配置 AnyKernel3..."
-        cat > anykernel.sh << 'AKEOF'
-        # AnyKernel3 Ramdisk Mod Script
-        # osm0sis @ xda-developers
-
-        ## AnyKernel setup
-        properties() { '
-        kernel.string=OnePlus 8 Pro KernelSU Next + cpufake support
-        do.devicecheck=1
-        do.modules=0
-        do.systemless=1
-        do.cleanup=1
-        do.cleanuponabort=0
-        device.name1=OnePlus8Pro
-        device.name2=instantnoodlep
-        device.name3=
-        device.name4=
-        device.name5=
-        supported.versions=
-        supported.patchlevels=
-        '; }
-
-        ## AnyKernel methods (DO NOT CHANGE)
-        # import patching functions/variables - see for reference
-        . tools/ak3-core.sh;
-
-        ## AnyKernel boot install
-        split_boot;
-
-        flash_boot;
-        flash_dtbo;
-        ## end boot install
-
-        AKEOF
-
-        echo "复制内核文件..."
-        cp ../arch/arm64/boot/Image.gz ./
-        if [ -f ../arch/arm64/boot/dtbo.img ]; then
-          cp ../arch/arm64/boot/dtbo.img ./
-        fi
-
-        echo "创建刷机包..."
-        zip -r9 ../OnePlus8Pro-KernelSU-cpufake-${{ github.event.inputs.kernel_version }}.zip * -x .git README.md *placeholder
-
-        cd ..
-        ls -lh OnePlus8Pro-KernelSU-cpufake-*.zip
-
-    - name: 上传编译产物
-      uses: actions/upload-artifact@v4
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v6
       with:
-        name: OnePlus8Pro-Kernel-KernelSU-${{ github.event.inputs.kernel_version }}
-        path: |
-          OnePlus8Pro-KernelSU-cpufake-*.zip
-          arch/arm64/boot/Image.gz
-        if-no-files-found: warn
+        name: Image-KSU-cpufake
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
-    - name: 创建 Release
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-KSU-cpufake-${{ github.event.inputs.kernel_version }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-*.zip
+
+    - name: Create Release
       uses: softprops/action-gh-release@v1
-      if: github.event_name == 'workflow_dispatch'
       with:
         tag_name: kernel-${{ github.event.inputs.kernel_version }}
         name: OnePlus 8 Pro Kernel ${{ github.event.inputs.kernel_version }}
         body: |
-          ## OnePlus 8 Pro 内核 - KernelSU Next + cpufake 支持
+          ## OnePlus 8 Pro 内核 - KernelSU + cpufake 模块支持
 
           ### 版本信息
-          - 设备: OnePlus 8 Pro (instantnoodlep)
-          - 基于: LineageOS 23.2 内核源码
-          - 内核版本: 4.19.325
-          - KernelSU Next: legacy 模式 (kprobe)
-          - 编译时间: ${{ github.run_number }}
+          - 设备: OnePlus 8 Pro (instantnoodlep) / OnePlus 8 / OnePlus 8T / OnePlus 9R
+          - 基于: LineageOS ${{ env.Lineage_VERSION }} 内核源码
+          - 内核版本: ${{ env.KERNEL_VERSION }}
+          - KernelSU: rsuntk 版本 ${{ env.RSKSUVER }}
+          - 编译时间: ${{ env.BUILD_TIME_1 }}
 
           ### 功能特性
-          - 集成 KernelSU Next (kprobe 模式)
+          - 集成 KernelSU (rsuntk 版本)
           - 禁用 MODULE_SIG_FORCE (支持未签名模块)
           - 启用完整 KALLSYMS 符号表
           - 启用 KPROBES 完整功能
@@ -244,24 +173,51 @@ jobs:
 
           ### 刷入方法
           1. 重启到 Recovery (TWRP/OrangeFox)
-          2. 刷入 OnePlus8Pro-KernelSU-cpufake-*.zip
+          2. 刷入 AK3-*.zip
           3. 重启系统
-          4. 安装 KernelSU Manager APK
+          4. 安装 KernelSU Manager APK (rsuntk 版本)
           5. 使用 insmod 加载 cpufake.ko 模块
 
           ### 验证方法
-          检查内核版本: adb shell uname -r
-          检查 KernelSU: adb shell su -c "ksud -V"
-          检查模块签名配置: adb shell su -c "zcat /proc/config.gz | grep MODULE_SIG"
+          ```bash
+          # 检查内核版本
+          adb shell uname -r
+
+          # 检查 KernelSU
+          adb shell su -c "ksud -V"
+
+          # 检查模块签名配置
+          adb shell su -c "zcat /proc/config.gz | grep MODULE_SIG"
+
+          # 加载 cpufake 模块
+          adb shell su -c "insmod /path/to/cpufake.ko"
+          adb shell lsmod | grep cpufake
+          ```
 
           ### 注意事项
           - 刷入前务必备份当前 boot 分区
-          - 如果无法启动，在 Recovery 中恢复备份或重新刷入 ROM
-          - 使用 kprobe 模式集成，如果启动失败可能是 kprobe 问题
-          - 首次刷入建议不要同时刷入其他内核模块
+          - 支持 A/B 分区设备，自动识别槽位
+          - 适用于 OnePlus 8 系列和 OnePlus 9R
+          - KernelSU Manager 下载：https://t.me/rsukrnlsu
         files: |
-          OnePlus8Pro-KernelSU-cpufake-*.zip
+          kernel_workspace/AnyKernel3/AK3-*.zip
         draft: false
         prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        {
+          echo "RSKSUVER=${{ env.RSKSUVER }}"
+          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          echo "cpufake_support=enabled"
+        } > build-info.txt
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v6
+      with:
+        name: build-info
+        path: kernel_workspace/build-info.txt
