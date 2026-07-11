@@ -1,4 +1,4 @@
-name: Build Kernel with KernelSU for OnePlus 8 Pro
+name: Build Kernel with KernelSU Next for OnePlus 8 Pro
 
 on:
   workflow_dispatch:
@@ -42,10 +42,10 @@ jobs:
         echo "Clang 版本："
         ./bin/clang --version
 
-    - name: 集成 KernelSU Next
+    - name: 集成 KernelSU Next (legacy 模式)
       run: |
-        echo "下载 KernelSU Next..."
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+        echo "下载 KernelSU Next (legacy 模式用于非 GKI 内核)..."
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
         echo "检查 KernelSU 集成状态..."
         if [ -d "KernelSU-Next" ] || [ -L "KernelSU" ]; then
@@ -56,11 +56,7 @@ jobs:
           exit 1
         fi
 
-        echo "修复内核兼容性问题..."
-        # 修复 mmu_notifier.h 编译错误
-        sed -i 's/enum mmu_notifier_event event,/int event,/g' include/linux/mmu_notifier.h || true
-
-    - name: 修改内核配置以支持 cpufake 模块
+    - name: 修改内核配置
       run: |
         echo "准备 defconfig..."
         export ARCH=arm64
@@ -75,7 +71,7 @@ jobs:
         # 使用 defconfig 生成基础配置
         make ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 defconfig
 
-        echo "修改配置以支持 cpufake 和 KernelSU..."
+        echo "修改配置以支持 cpufake 和 KernelSU Next..."
 
         # cpufake 模块必需配置
         scripts/config --file .config --enable MODULES
@@ -86,21 +82,23 @@ jobs:
         scripts/config --file .config --disable MODULE_SIG_ALL
         scripts/config --file .config --enable KALLSYMS
         scripts/config --file .config --enable KALLSYMS_ALL
+
+        # KernelSU Next kprobe 模式必需配置
         scripts/config --file .config --enable KPROBES
         scripts/config --file .config --enable KPROBE_EVENTS
         scripts/config --file .config --enable KRETPROBES
+        scripts/config --file .config --enable KSU_KPROBE_HOOKS
+        scripts/config --file .config --enable KSU
 
-        # KernelSU 必需配置
+        # KernelSU 其他推荐配置
         scripts/config --file .config --enable OVERLAY_FS
-        scripts/config --file .config --enable KPROBES
-        scripts/config --file .config --enable UPROBES
-        scripts/config --file .config --enable TRACEPOINTS
+        scripts/config --file .config --enable MODULES
 
         # 重新生成最终配置
         make ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
 
         echo "关键配置验证："
-        grep -E "CONFIG_MODULES=|CONFIG_MODULE_SIG|CONFIG_KALLSYMS|CONFIG_KPROBES|CONFIG_OVERLAY_FS" .config | head -20
+        grep -E "CONFIG_MODULES=|CONFIG_MODULE_SIG|CONFIG_KALLSYMS|CONFIG_KPROBES|CONFIG_KSU" .config | head -25
 
     - name: 编译内核
       run: |
@@ -145,7 +143,7 @@ jobs:
 
         ## AnyKernel setup
         properties() { '
-        kernel.string=OnePlus 8 Pro KernelSU + cpufake support
+        kernel.string=OnePlus 8 Pro KernelSU Next + cpufake support
         do.devicecheck=1
         do.modules=0
         do.systemless=1
@@ -192,7 +190,6 @@ jobs:
         path: |
           OnePlus8Pro-KernelSU-cpufake-*.zip
           arch/arm64/boot/Image.gz
-          arch/arm64/boot/dtbo.img
         if-no-files-found: warn
 
     - name: 创建 Release
@@ -202,16 +199,17 @@ jobs:
         tag_name: kernel-${{ github.event.inputs.kernel_version }}
         name: OnePlus 8 Pro Kernel ${{ github.event.inputs.kernel_version }}
         body: |
-          ## OnePlus 8 Pro 内核 - KernelSU + cpufake 支持
+          ## OnePlus 8 Pro 内核 - KernelSU Next + cpufake 支持
 
           ### 版本信息
           - 设备: OnePlus 8 Pro (instantnoodlep)
           - 基于: LineageOS 23.2 内核源码
           - 内核版本: 4.19.325
+          - KernelSU Next: legacy 模式 (kprobe)
           - 编译时间: ${{ github.run_number }}
 
           ### 功能特性
-          - 集成 KernelSU Next
+          - 集成 KernelSU Next (kprobe 模式)
           - 禁用 MODULE_SIG_FORCE (支持未签名模块)
           - 启用完整 KALLSYMS 符号表
           - 启用 KPROBES 完整功能
@@ -232,6 +230,7 @@ jobs:
           ### 注意事项
           - 刷入前务必备份当前 boot 分区
           - 如果无法启动，在 Recovery 中恢复备份或重新刷入 ROM
+          - 使用 kprobe 模式集成，如果启动失败可能是 kprobe 问题
           - 首次刷入建议不要同时刷入其他内核模块
         files: |
           OnePlus8Pro-KernelSU-cpufake-*.zip
