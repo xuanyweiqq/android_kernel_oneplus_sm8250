@@ -56,6 +56,10 @@ jobs:
           exit 1
         fi
 
+        echo "修复内核兼容性问题..."
+        # 修复 mmu_notifier.h 编译错误
+        sed -i 's/enum mmu_notifier_event event,/int event,/g' include/linux/mmu_notifier.h || true
+
     - name: 修改内核配置以支持 cpufake 模块
       run: |
         echo "准备 defconfig..."
