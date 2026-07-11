@@ -60,16 +60,26 @@ jobs:
       run: |
         echo "修复内核兼容性问题..."
 
-        # 修复 1: mmu_notifier.h - 添加缺失的宏定义
-        if ! grep -q "MMU_NOTIFY_UNMAP" include/linux/mmu_notifier.h; then
-          sed -i '/enum mmu_notifier_event {/a\        MMU_NOTIFY_UNMAP = 0,' include/linux/mmu_notifier.h
+        # 修复 1: mmu_notifier.h - 彻底修复枚举类型问题
+        # 找到 enum mmu_notifier_event 的定义并添加缺失的值
+        if grep -q "enum mmu_notifier_event" include/linux/mmu_notifier.h; then
+          # 在枚举定义中添加 MMU_NOTIFY_UNMAP
+          sed -i '/^enum mmu_notifier_event {/,/^};/s/^};/\tMMU_NOTIFY_UNMAP = 0,\n};/' include/linux/mmu_notifier.h
         fi
 
-        # 修复 2: NFS client - cl_softerr 改为 cl_softrtry
-        sed -i 's/cl_softerr/cl_softrtry/g' fs/nfs/client.c
+        # 同时修复函数参数类型不完整的问题
+        sed -i 's/enum mmu_notifier_event event,/unsigned long event,/g' include/linux/mmu_notifier.h
 
-        # 修复 3: machine_kexec - 注释掉冲突的函数调用
-        sed -i 's/cpu_soft_restart(reboot_code_buffer_phys, kimage->head, kimage->start, 0);/\/\/ cpu_soft_restart - disabled due to signature mismatch/g' arch/arm64/kernel/machine_kexec.c
+        # 修复 2: NFS client - cl_softerr 改为 cl_softrtry
+        if [ -f fs/nfs/client.c ]; then
+          sed -i 's/cl_softerr/cl_softrtry/g' fs/nfs/client.c
+        fi
+
+        # 修复 3: machine_kexec - 修复函数签名不匹配
+        if [ -f arch/arm64/kernel/machine_kexec.c ]; then
+          # 将4个参数的调用改为2个参数
+          sed -i 's/cpu_soft_restart(reboot_code_buffer_phys, kimage->head, kimage->start, 0);/cpu_soft_restart(reboot_code_buffer_phys, kimage->start);/g' arch/arm64/kernel/machine_kexec.c
+        fi
 
         echo "准备 defconfig..."
         export ARCH=arm64
