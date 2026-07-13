@@ -54,76 +54,18 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
-
-        # 创建 patches 目录并下载补丁脚本
         mkdir -p patches
         cd patches
         wget -O kernel-4.19-patch.sh https://raw.githubusercontent.com/AzusaHana/KernelSU_Build_Test/e7c69b603a29d991fb6e4f4d1a90480c90e6c283/patches/kernel-4.19-patch.sh
         chmod +x kernel-4.19-patch.sh
 
-    - name: Create GOT relocation support patch
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/patches
-        cat > 0001-arm64-module-add-got-relocation-support.patch << 'EOFPATCH'
-        From: GitHub Actions <actions@github.com>
-        Date: Sat, 13 Jul 2024 10:00:00 +0800
-        Subject: [PATCH] arm64 module Add support for GOT relocations
-
-        Add support for GOT-based relocations for kernel modules.
-
-        Signed-off-by: GitHub Actions <actions@github.com>
-        ---
-         arch/arm64/kernel/module.c | 27 +++++++++++++++++++++++++++
-         1 file changed, 27 insertions(+)
-
-        diff --git a/arch/arm64/kernel/module.c b/arch/arm64/kernel/module.c
-        index 1234567890ab..abcdef123456 100644
-        --- a/arch/arm64/kernel/module.c
-        +++ b/arch/arm64/kernel/module.c
-        @@ -425,6 +425,33 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
-         				}
-         				break;
-
-        +			case 311:
-        +				ovf = reloc_insn_adrp(me, loc, val);
-        +				if (ovf && ovf != -ERANGE)
-        +					return ovf;
-        +				break;
-        +			case 312:
-        +				overflow_check = false;
-        +				ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 9,
-        +						     AARCH64_INSN_IMM_12);
-        +				break;
-        +			case 313:
-        +				overflow_check = false;
-        +				ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 12,
-        +						     AARCH64_INSN_IMM_12);
-        +				break;
-        +			case 309:
-        +			case 310:
-        +				ovf = reloc_data(RELOC_OP_ABS, loc, val,
-        +						 ELF64_R_TYPE(rel[i].r_info) == 309 ? 64 : 32);
-        +				break;
-        +
-         			default:
-         				pr_err("module %s: unsupported RELA relocation: %llu\n",
-         				       me->name, ELF64_R_TYPE(rel[i].r_info));
-        --
-        2.40.0
-        EOFPATCH
-
-        echo "✅ GOT 重定位补丁创建完成"
-        ls -lh 0001-arm64-module-add-got-relocation-support.patch
-
     - name: Set up KernelSU (rsuntk)
       run: |
         cd kernel_workspace/android-kernel
-
         echo "============================================"
         echo "集成 KernelSU (rsuntk 版本)"
         echo "============================================"
         curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
-
         if [ -d "KernelSU" ]; then
           echo "✅ KernelSU 下载成功"
           ls -la KernelSU/
@@ -131,220 +73,143 @@ jobs:
           echo "❌ KernelSU 下载失败"
           exit 1
         fi
-
         echo ""
         echo "============================================"
         echo "应用 4.19 内核补丁（KernelSU 钩子）"
         echo "============================================"
         bash $GITHUB_WORKSPACE/kernel_workspace/patches/kernel-4.19-patch.sh
-
         if [ $? -eq 0 ]; then
           echo "✅ KernelSU 补丁应用成功"
         else
           echo "⚠️  补丁应用有问题，但继续编译"
         fi
-
-        # 验证补丁是否生效
         echo ""
         echo "验证 KernelSU 钩子..."
         grep -q "ksu_handle_execveat" fs/exec.c && echo "✅ fs/exec.c 已打补丁" || echo "❌ fs/exec.c 未打补丁"
         grep -q "ksu_handle_faccessat" fs/open.c && echo "✅ fs/open.c 已打补丁" || echo "❌ fs/open.c 未打补丁"
-        grep -q "ksu_handle_sys_read" fs/read_write.c && echo "✅ fs/read_write.c 已打补丁" || echo "❌ fs/read_write.c 未打补丁"
-        grep -q "ksu_handle_stat" fs/stat.c && echo "✅ fs/stat.c 已打补丁" || echo "❌ fs/stat.c 未打补丁"
-        grep -q "ksu_handle_sys_reboot" kernel/reboot.c && echo "✅ kernel/reboot.c 已打补丁" || echo "❌ kernel/reboot.c 未打补丁"
 
-    - name: Apply GOT relocation support patch
+    - name: Apply GOT relocation support
       run: |
         cd kernel_workspace/android-kernel
-
-        echo ""
         echo "============================================"
-        echo "应用 GOT 重定位支持补丁"
+        echo "应用 GOT 重定位支持"
         echo "============================================"
 
-        # 检查 module.c 是否存在
-        if [ ! -f "arch/arm64/kernel/module.c" ]; then
-          echo "❌ 错误: arch/arm64/kernel/module.c 不存在"
+        # 创建插入脚本
+        cat > /tmp/insert_got.sh << 'EOF'
+        #!/bin/bash
+        FILE="arch/arm64/kernel/module.c"
+
+        # 查找 default 分支位置
+        LINE=$(grep -n "default:" "$FILE" | grep -B2 "unsupported RELA" | head -1 | cut -d: -f1)
+
+        if [ -z "$LINE" ]; then
+          echo "找不到插入位置"
           exit 1
         fi
 
-        # 应用补丁
-        if patch -p1 --dry-run < $GITHUB_WORKSPACE/kernel_workspace/patches/0001-arm64-module-add-got-relocation-support.patch; then
-          echo "补丁检查通过，开始应用..."
-          patch -p1 < $GITHUB_WORKSPACE/kernel_workspace/patches/0001-arm64-module-add-got-relocation-support.patch
-          echo "✅ GOT 重定位补丁应用成功"
-        else
-          echo "⚠️  补丁无法直接应用，尝试模糊匹配..."
-          patch -p1 --fuzz=3 < $GITHUB_WORKSPACE/kernel_workspace/patches/0001-arm64-module-add-got-relocation-support.patch || {
-            echo "❌ 补丁应用失败"
-            echo "手动检查 module.c 结构..."
-            grep -n "case R_AARCH64_CALL26" arch/arm64/kernel/module.c || echo "未找到参考点"
-            grep -n "default:" arch/arm64/kernel/module.c | head -5
-            exit 1
-          }
-        fi
+        echo "在第 $LINE 行前插入代码"
 
-        echo ""
-        echo "验证补丁效果..."
-        if grep -q "case 311.*R_AARCH64_ADR_GOT_PAGE" arch/arm64/kernel/module.c || \
-           grep -q "case 311:" arch/arm64/kernel/module.c; then
-          echo "✅ 找到 case 311 代码"
+        # 创建临时文件
+        head -n $((LINE - 1)) "$FILE" > "$FILE.tmp"
+
+        # 插入新代码
+        cat >> "$FILE.tmp" << 'GOTCODE'
+
+        		case 311:
+        			ovf = reloc_insn_adrp(me, loc, val);
+        			if (ovf && ovf != -ERANGE)
+        				return ovf;
+        			break;
+        		case 312:
+        			overflow_check = false;
+        			ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 9, AARCH64_INSN_IMM_12);
+        			break;
+        		case 313:
+        			overflow_check = false;
+        			ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 12, AARCH64_INSN_IMM_12);
+        			break;
+        		case 309:
+        		case 310:
+        			ovf = reloc_data(RELOC_OP_ABS, loc, val, ELF64_R_TYPE(rel[i].r_info) == 309 ? 64 : 32);
+        			break;
+        GOTCODE
+
+        # 添加剩余部分
+        tail -n +$LINE "$FILE" >> "$FILE.tmp"
+
+        # 替换原文件
+        mv "$FILE.tmp" "$FILE"
+        EOF
+
+        chmod +x /tmp/insert_got.sh
+        /tmp/insert_got.sh
+
+        # 验证
+        if grep -q "case 311:" arch/arm64/kernel/module.c; then
+          echo "✅ GOT 重定位代码已添加"
         else
-          echo "❌ 未找到 case 311 代码"
+          echo "❌ 添加失败"
           exit 1
         fi
-
-        if grep -q "case 312:" arch/arm64/kernel/module.c; then
-          echo "✅ 找到 case 312 代码"
-        else
-          echo "❌ 未找到 case 312 代码"
-          exit 1
-        fi
-
-        echo ""
-        echo "显示修改摘要:"
-        git diff --stat arch/arm64/kernel/module.c || echo "（git diff 不可用）"
-
-        echo ""
-        echo "显示新增代码预览（前30行）:"
-        git diff arch/arm64/kernel/module.c | grep "^+" | head -30 || echo "（git diff 不可用）"
 
     - name: Configure kernel for cpufake module support
       run: |
         cd kernel_workspace/android-kernel
-
-        echo ""
         echo "============================================"
         echo "配置内核以支持 cpufake 模块"
         echo "============================================"
-
-        # KernelSU 配置（手动 hook 模式）
         echo "# KernelSU configuration" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
-        # cpufake 模块必需配置
         echo "# cpufake module support" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_MODULES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_MODULE_UNLOAD=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_MODVERSIONS=n" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "# CONFIG_MODULE_SIG is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "# CONFIG_MODULE_SIG_FORCE is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "# CONFIG_MODULE_SIG_ALL is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "CONFIG_KRETPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
         echo "✅ 内核配置已更新"
-
         RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 29971)
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         echo "KernelSU 版本号: $RSKSUVER"
-
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
     - name: Build kernel
       run: |
         cd kernel_workspace/android-kernel
-
-        echo ""
         echo "============================================"
         echo "开始编译内核"
         echo "============================================"
         echo "开始时间: $(date)"
-        echo "CPU 核心数: $(nproc --all)"
-        echo ""
-
         export ARCH=arm64
         export SUBARCH=arm64
         export BRAND_SHOW_FLAG=oneplus
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
         export KBUILD_BUILD_HOST=Github-Action
         export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-
         BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
         EX_CMD="LD=ld.lld LLVM=1"
         DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
-
         echo "配置内核..."
         make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
-
-        echo ""
         echo "编译内核镜像..."
         make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
-
-        echo ""
-        echo "编译完成时间: $(date)"
+        echo "编译完成: $(date)"
 
     - name: Check kernel output
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-
         if [ -f arch/arm64/boot/Image ]; then
           echo "CHECK_IMAGE=true" >> $GITHUB_ENV
           KERNEL_VERSION=$(cat include/config/kernel.release)
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
-
-          IMAGE_SIZE=$(stat -c%s arch/arm64/boot/Image)
-          echo ""
           echo "✅ 内核编译成功"
-          echo "   版本: $KERNEL_VERSION"
-          echo "   大小: $IMAGE_SIZE bytes ($(numfmt --to=iec-i --suffix=B $IMAGE_SIZE))"
+          echo "版本: $KERNEL_VERSION"
+          ls -lh arch/arm64/boot/Image
         else
-          echo "❌ 内核编译失败: Image 文件不存在"
+          echo "❌ 编译失败"
           exit 1
-        fi
-
-    - name: Verify kernel configuration
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-
-        echo ""
-        echo "============================================"
-        echo "验证内核配置"
-        echo "============================================"
-
-        echo "模块支持配置:"
-        grep -E "CONFIG_MODULES=|CONFIG_MODULE_SIG|CONFIG_MODVERSIONS" .config || echo "（部分配置未找到）"
-
-        echo ""
-        echo "符号表配置:"
-        grep -E "CONFIG_KALLSYMS|CONFIG_KALLSYMS_ALL" .config || echo "（部分配置未找到）"
-
-        echo ""
-        echo "Kprobes 配置:"
-        grep -E "CONFIG_KPROBES|CONFIG_KPROBE_EVENTS|CONFIG_KRETPROBES" .config || echo "（部分配置未找到）"
-
-        echo ""
-        echo "KernelSU 配置:"
-        grep "CONFIG_KSU" .config || echo "（KSU 配置未找到）"
-
-    - name: Verify GOT relocation support in compiled kernel
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-
-        echo ""
-        echo "============================================"
-        echo "验证 GOT 重定位支持是否编译进内核"
-        echo "============================================"
-
-        if [ -f arch/arm64/kernel/module.o ]; then
-          echo "✅ module.o 已生成"
-          MODULE_SIZE=$(stat -c%s arch/arm64/kernel/module.o)
-          echo "   大小: $MODULE_SIZE bytes"
-
-          # 尝试反汇编检查（如果工具可用）
-          if command -v aarch64-linux-gnu-objdump >/dev/null 2>&1; then
-            echo ""
-            echo "检查 module.o 中的 apply_relocate_add 函数..."
-            aarch64-linux-gnu-objdump -d arch/arm64/kernel/module.o | \
-              grep -A 5 "apply_relocate_add" | head -20 || echo "（无法提取函数）"
-          else
-            echo "（aarch64-linux-gnu-objdump 不可用，跳过反汇编检查）"
-          fi
-        else
-          echo "⚠️  module.o 未找到"
         fi
 
     - name: Prepare AnyKernel3 and package
@@ -354,76 +219,50 @@ jobs:
         sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
         sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
         sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
-
-        # 更新内核描述
-        sed -i 's/kernel.string=.*/kernel.string=OnePlus 8 Pro KernelSU + cpufake + GOT support by ${{ github.actor }}/' AnyKernel3/anykernel.sh
-
+        sed -i 's/kernel.string=.*/kernel.string=OnePlus 8 Pro KernelSU + cpufake + GOT by ${{ github.actor }}/' AnyKernel3/anykernel.sh
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
         cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-
         cd AnyKernel3
         zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU-GOT-${{ github.event.inputs.kernel_version }}.zip ./*
-
-        echo ""
-        echo "✅ AnyKernel3 打包完成"
+        echo "✅ 打包完成"
         ls -lh AK3-*.zip
 
-    - name: Upload Image artifact
-      if: env.CHECK_IMAGE == 'true'
+    - name: Upload Image
+      if: success()
       uses: actions/upload-artifact@v6
       with:
-        name: Image-KSU-cpufake-GOT-${{ env.BUILD_TIME }}
+        name: Image-KSU-GOT-${{ env.BUILD_TIME }}
         path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
     - name: Upload AnyKernel3 ZIP
       uses: actions/upload-artifact@v6
       with:
         name: AK3-KSU-GOT-${{ github.event.inputs.kernel_version }}-${{ env.BUILD_TIME }}
-        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-*.zip
+        path: kernel_workspace/AnyKernel3/AK3-*.zip
 
-    - name: Save detailed build info
+    - name: Save build info
       run: |
         cd kernel_workspace
-        {
-          echo "=== 内核构建信息 ==="
-          echo "RSKSUVER=${{ env.RSKSUVER }}"
-          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
-          echo "BUILD_TIME=${{ env.BUILD_TIME_1 }}"
-          echo "BUILD_USER=${{ github.actor }}"
-          echo "BUILD_HOST=Github-Action"
-          echo ""
-          echo "=== 功能支持 ==="
-          echo "KernelSU=enabled (rsuntk version)"
-          echo "cpufake_support=enabled"
-          echo "GOT_relocation_support=enabled"
-          echo ""
-          echo "=== 补丁列表 ==="
-          echo "1. KernelSU 4.19 kernel hooks"
-          echo "2. ARM64 GOT relocation support (R_AARCH64_ADR_GOT_PAGE and related)"
-          echo ""
-          echo "=== 支持的重定位类型 ==="
-          echo "- 311 (R_AARCH64_ADR_GOT_PAGE)"
-          echo "- 312 (R_AARCH64_LD64_GOT_LO12_NC)"
-          echo "- 313 (R_AARCH64_LD64_GOTPAGE_LO15)"
-          echo "- 309 (R_AARCH64_GOTREL64)"
-          echo "- 310 (R_AARCH64_GOTREL32)"
-          echo ""
-          echo "=== 使用说明 ==="
-          echo "此内核支持加载包含全局函数指针的内核模块"
-          echo "可以正常加载 cpufake.ko 等动态编译的模块"
-          echo "模块加载不再出现 'unsupported RELA relocation: 311' 错误"
-        } > build-info.txt
-
-        cat build-info.txt
+        echo "=== 内核构建信息 ===" > build-info.txt
+        echo "RSKSUVER=${{ env.RSKSUVER }}" >> build-info.txt
+        echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}" >> build-info.txt
+        echo "BUILD_TIME=${{ env.BUILD_TIME_1 }}" >> build-info.txt
+        echo "BUILD_USER=${{ github.actor }}" >> build-info.txt
+        echo "" >> build-info.txt
+        echo "=== 功能支持 ===" >> build-info.txt
+        echo "KernelSU=enabled" >> build-info.txt
+        echo "cpufake_support=enabled" >> build-info.txt
+        echo "GOT_relocation_support=enabled" >> build-info.txt
+        echo "" >> build-info.txt
+        echo "=== 支持的重定位类型 ===" >> build-info.txt
+        echo "311 (R_AARCH64_ADR_GOT_PAGE)" >> build-info.txt
+        echo "312 (R_AARCH64_LD64_GOT_LO12_NC)" >> build-info.txt
+        echo "313 (R_AARCH64_LD64_GOTPAGE_LO15)" >> build-info.txt
+        echo "309 (R_AARCH64_GOTREL64)" >> build-info.txt
+        echo "310 (R_AARCH64_GOTREL32)" >> build-info.txt
 
     - name: Upload build info
       uses: actions/upload-artifact@v6
       with:
         name: build-info-${{ env.BUILD_TIME }}
         path: kernel_workspace/build-info.txt
-
-    - name: Upload GOT patch for reference
-      uses: actions/upload-artifact@v6
-      with:
-        name: got-relocation-patch
-        path: kernel_workspace/patches/0001-arm64-module-add-got-relocation-support.patch
