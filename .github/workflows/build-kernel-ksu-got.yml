@@ -65,74 +65,74 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/patches
         cat > 0001-arm64-module-add-got-relocation-support.patch << 'EOFPATCH'
-From: GitHub Actions <actions@github.com>
-Date: Sat, 13 Jul 2024 10:00:00 +0800
-Subject: [PATCH] arm64: module: Add support for GOT relocations
+        From: GitHub Actions <actions@github.com>
+        Date: Sat, 13 Jul 2024 10:00:00 +0800
+        Subject: [PATCH] arm64 module Add support for GOT relocations
 
-Add support for GOT-based relocations (R_AARCH64_ADR_GOT_PAGE and related)
-to allow loading modules compiled with global function pointers.
+        Add support for GOT-based relocations (R_AARCH64_ADR_GOT_PAGE and related)
+        to allow loading modules compiled with global function pointers.
 
-These relocations are generated when dealing with global function pointers
-even with -fno-pic -fno-plt flags. We treat them as direct relocations
-since kernel modules don't use dynamic linking.
+        These relocations are generated when dealing with global function pointers
+        even with -fno-pic -fno-plt flags. We treat them as direct relocations
+        since kernel modules do not use dynamic linking.
 
-This patch enables loading of cpufake.ko and similar modules that use
-extensive global function pointers for dynamic symbol resolution.
+        This patch enables loading of cpufake.ko and similar modules that use
+        extensive global function pointers for dynamic symbol resolution.
 
-Signed-off-by: GitHub Actions <actions@github.com>
----
- arch/arm64/kernel/module.c | 33 +++++++++++++++++++++++++++++++++
- 1 file changed, 33 insertions(+)
+        Signed-off-by: GitHub Actions <actions@github.com>
+        ---
+         arch/arm64/kernel/module.c | 33 +++++++++++++++++++++++++++++++++
+         1 file changed, 33 insertions(+)
 
-diff --git a/arch/arm64/kernel/module.c b/arch/arm64/kernel/module.c
-index 1234567890ab..abcdef123456 100644
---- a/arch/arm64/kernel/module.c
-+++ b/arch/arm64/kernel/module.c
-@@ -425,6 +425,39 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
- 				}
- 				break;
+        diff --git a/arch/arm64/kernel/module.c b/arch/arm64/kernel/module.c
+        index 1234567890ab..abcdef123456 100644
+        --- a/arch/arm64/kernel/module.c
+        +++ b/arch/arm64/kernel/module.c
+        @@ -425,6 +425,39 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
+         				}
+         				break;
 
-+			/* GOT-based relocations
-+			 *
-+			 * These are typically used in position-independent code (PIC),
-+			 * but some compilers may generate them even with -fno-pic
-+			 * when dealing with global function pointers.
-+			 *
-+			 * We treat them as direct relocations for kernel modules,
-+			 * which is safe because:
-+			 * 1. Kernel modules are loaded in kernel address space
-+			 * 2. All symbols are resolved at load time
-+			 * 3. No dynamic linking is involved
-+			 */
-+			case 311: /* R_AARCH64_ADR_GOT_PAGE */
-+				/* GOT page address - treat as regular ADRP */
-+				ovf = reloc_insn_adrp(me, loc, val);
-+				if (ovf && ovf != -ERANGE)
-+					return ovf;
-+				break;
-+			case 312: /* R_AARCH64_LD64_GOT_LO12_NC */
-+				/* GOT entry offset - treat as regular 64-bit load offset */
-+				overflow_check = false;
-+				ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 9,
-+						     AARCH64_INSN_IMM_12);
-+				break;
-+			case 313: /* R_AARCH64_LD64_GOTPAGE_LO15 */
-+				overflow_check = false;
-+				ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 12,
-+						     AARCH64_INSN_IMM_12);
-+				break;
-+			case 309: /* R_AARCH64_GOTREL64 */
-+			case 310: /* R_AARCH64_GOTREL32 */
-+				ovf = reloc_data(RELOC_OP_ABS, loc, val,
-+						 ELF64_R_TYPE(rel[i].r_info) == 309 ? 64 : 32);
-+				break;
-+
- 			default:
- 				pr_err("module %s: unsupported RELA relocation: %llu\n",
- 				       me->name, ELF64_R_TYPE(rel[i].r_info));
---
-2.40.0
-EOFPATCH
+        +			/* GOT-based relocations
+        +			 *
+        +			 * These are typically used in position-independent code (PIC),
+        +			 * but some compilers may generate them even with -fno-pic
+        +			 * when dealing with global function pointers.
+        +			 *
+        +			 * We treat them as direct relocations for kernel modules,
+        +			 * which is safe because:
+        +			 * 1. Kernel modules are loaded in kernel address space
+        +			 * 2. All symbols are resolved at load time
+        +			 * 3. No dynamic linking is involved
+        +			 */
+        +			case 311: /* R_AARCH64_ADR_GOT_PAGE */
+        +				/* GOT page address - treat as regular ADRP */
+        +				ovf = reloc_insn_adrp(me, loc, val);
+        +				if (ovf && ovf != -ERANGE)
+        +					return ovf;
+        +				break;
+        +			case 312: /* R_AARCH64_LD64_GOT_LO12_NC */
+        +				/* GOT entry offset - treat as regular 64-bit load offset */
+        +				overflow_check = false;
+        +				ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 9,
+        +						     AARCH64_INSN_IMM_12);
+        +				break;
+        +			case 313: /* R_AARCH64_LD64_GOTPAGE_LO15 */
+        +				overflow_check = false;
+        +				ovf = reloc_insn_imm(RELOC_OP_ABS, loc, val, 3, 12,
+        +						     AARCH64_INSN_IMM_12);
+        +				break;
+        +			case 309: /* R_AARCH64_GOTREL64 */
+        +			case 310: /* R_AARCH64_GOTREL32 */
+        +				ovf = reloc_data(RELOC_OP_ABS, loc, val,
+        +						 ELF64_R_TYPE(rel[i].r_info) == 309 ? 64 : 32);
+        +				break;
+        +
+         			default:
+         				pr_err("module %s: unsupported RELA relocation: %llu\n",
+         				       me->name, ELF64_R_TYPE(rel[i].r_info));
+        --
+        2.40.0
+        EOFPATCH
 
         echo "✅ GOT 重定位补丁创建完成"
         ls -lh 0001-arm64-module-add-got-relocation-support.patch
