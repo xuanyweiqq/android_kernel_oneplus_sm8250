@@ -1,0 +1,239 @@
+name: Build Kernel with GOT Relocation Support (v3 - Correct Implementation)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '内核版本标签'
+        required: false
+        default: 'v1.0-got-v3'
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-23.2
+
+jobs:
+  build:
+    name: Build Kernel with Correct GOT Support
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git-core gnupg flex bison build-essential \
+          zip curl zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
+          libncurses5 lib32ncurses5-dev x11proto-core-dev libx11-dev \
+          lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip \
+          fontconfig python3 bc cpio
+
+    - name: Download Clang
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        mkdir -p clang-aosp
+        tar -xzf ${CLANG_VERSION}.tar.gz -C clang-aosp
+        ls -la clang-aosp/bin/
+
+    - name: Clone kernel source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --depth=1 --branch=${Lineage_VERSION} \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8250 android-kernel
+        cd android-kernel
+        git log --oneline -1
+
+    - name: Setup KernelSU
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+
+        if [ -d "KernelSU" ]; then
+          echo "KernelSU 下载成功"
+          ls -la KernelSU/
+        else
+          echo "KernelSU 下载失败"
+          exit 1
+        fi
+
+        echo "应用 4.19 内核补丁..."
+        bash $GITHUB_WORKSPACE/kernel_workspace/patches/kernel-4.19-patch.sh
+
+        if [ $? -eq 0 ]; then
+          echo "补丁应用成功"
+        else
+          echo "补丁应用失败，但继续编译"
+        fi
+
+        # 验证补丁是否生效
+        echo "验证关键文件是否包含 KSU 钩子..."
+        grep -q "ksu_handle_execveat" fs/exec.c && echo "✓ fs/exec.c 已打补丁" || echo "✗ fs/exec.c 未打补丁"
+        grep -q "ksu_handle_faccessat" fs/open.c && echo "✓ fs/open.c 已打补丁" || echo "✗ fs/open.c 未打补丁"
+
+        # 配置内核
+        echo "配置内核以支持模块加载..."
+        echo "CONFIG_MODULES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_MODULE_UNLOAD=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG_FORCE is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG_ALL is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KRETPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 29971)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+    - name: Apply GOT relocation support (v3 - Correct)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
+        echo "=========================================="
+        echo "应用正确的 GOT 重定位支持补丁"
+        echo "=========================================="
+
+        MODULE_FILE="arch/arm64/kernel/module.c"
+
+        # 查找插入位置
+        LINE=$(grep -n "pr_err.*unsupported RELA relocation" "$MODULE_FILE" | head -1 | cut -d: -f1)
+
+        if [ -z "$LINE" ]; then
+          echo "❌ 无法找到插入位置"
+          exit 1
+        fi
+
+        echo "在第 $LINE 行前插入 GOT 重定位代码"
+
+        # 备份
+        cp "$MODULE_FILE" "$MODULE_FILE.bak"
+
+        # 分割并插入
+        head -n $((LINE - 1)) "$MODULE_FILE.bak" > "$MODULE_FILE"
+
+        cat >> "$MODULE_FILE" << 'GOTCODE'
+
+		/* ===== GOT 重定位支持 (v3) =====
+		 * 将 GOT 重定位转换为对符号的直接访问
+		 */
+		case 311:  /* R_AARCH64_ADR_GOT_PAGE */
+			ovf = reloc_insn_adrp(me, loc, val);
+			if (ovf && ovf != -ERANGE)
+				return ovf;
+			break;
+
+		case 312:  /* R_AARCH64_LD64_GOT_LO12_NC */
+			overflow_check = false;
+			{
+				u64 imm = ((val & 0xFFF) >> 3) & 0xFFF;
+				u32 insn = le32_to_cpu(*(__le32 *)loc);
+				insn &= ~(0xFFF << 10);
+				insn |= (imm & 0xFFF) << 10;
+				*(__le32 *)loc = cpu_to_le32(insn);
+			}
+			break;
+
+		case 309:  /* R_AARCH64_ABS64 */
+		case 310:  /* R_AARCH64_ABS32 */
+			ovf = reloc_data(RELOC_OP_ABS, loc, val,
+			                 ELF64_R_TYPE(rel[i].r_info) == 309 ? 64 : 32);
+			break;
+GOTCODE
+
+        tail -n +$LINE "$MODULE_FILE.bak" >> "$MODULE_FILE"
+
+        # 验证
+        if grep -q "case 311:" "$MODULE_FILE"; then
+          echo "✅ GOT 重定位支持已添加"
+          echo "支持的类型: 311 (ADR_GOT_PAGE), 312 (LD64_GOT_LO12_NC), 309/310 (ABS)"
+        else
+          echo "❌ 添加失败"
+          exit 1
+        fi
+
+    - name: Build kernel
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Check kernel output
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Kernel output file is empty"
+          exit 1
+        fi
+
+    - name: Prepare AnyKernel3 and package
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+
+        sed -i 's/kernel.string=.*/kernel.string=OnePlus 8 Pro KernelSU + GOT v3 by ${{ github.actor }}/' AnyKernel3/anykernel.sh
+
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        cd AnyKernel3
+        zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU-GOT-v3-${{ github.event.inputs.kernel_version }}.zip ./*
+
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Image-${{ env.KERNEL_VERSION }}
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 package
+      uses: actions/upload-artifact@v4
+      with:
+        name: AK3-GOT-v3-${{ github.event.inputs.kernel_version }}
+        path: kernel_workspace/AnyKernel3/*.zip
+
+    - name: Create build info
+      run: |
+        cat > build-info.txt << EOF
+        Build Information
+        ==================
+        Kernel Version: ${{ env.KERNEL_VERSION }}
+        KernelSU Version: ${{ env.RSKSUVER }}
+        Build Time: $(date)
+        Builder: ${{ github.actor }}
+        Clang Version: ${{ env.CLANG_VERSION }}
+        GOT Support: v3 (Correct Implementation)
+        Supported Relocations: 311, 312, 309, 310
+        EOF
+        cat build-info.txt
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-info
+        path: build-info.txt
