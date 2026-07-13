@@ -1,0 +1,241 @@
+name: Build Kernel with Build Environment Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '内核版本标签'
+        required: false
+        default: 'v1.0-buildenv'
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-23.2
+
+jobs:
+  build:
+    name: Build Kernel with KernelSU and Export Build Environment
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Setup build kernel environment
+      run: |
+        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
+        sudo apt-get update
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v5
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    - name: Download & extract Clang-aosp (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir -p clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+
+    - name: Download kernel source and patches
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+
+        mkdir -p patches
+        cd patches
+        wget -O kernel-4.19-patch.sh https://raw.githubusercontent.com/AzusaHana/KernelSU_Build_Test/e7c69b603a29d991fb6e4f4d1a90480c90e6c283/patches/kernel-4.19-patch.sh
+        chmod +x kernel-4.19-patch.sh
+
+    - name: Set up KernelSU (rsuntk)
+      run: |
+        cd kernel_workspace/android-kernel
+
+        echo "集成 KernelSU (rsuntk 版本)..."
+        curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
+
+        if [ -d "KernelSU" ]; then
+          echo "KernelSU 下载成功"
+          ls -la KernelSU/
+        else
+          echo "KernelSU 下载失败"
+          exit 1
+        fi
+
+        echo "应用 4.19 内核补丁..."
+        bash $GITHUB_WORKSPACE/kernel_workspace/patches/kernel-4.19-patch.sh
+
+        if [ $? -eq 0 ]; then
+          echo "补丁应用成功"
+        else
+          echo "补丁应用失败，但继续编译"
+        fi
+
+        # 验证补丁是否生效
+        echo "验证关键文件是否包含 KSU 钩子..."
+        grep -q "ksu_handle_execveat" fs/exec.c && echo "✓ fs/exec.c 已打补丁" || echo "✗ fs/exec.c 未打补丁"
+        grep -q "ksu_handle_faccessat" fs/open.c && echo "✓ fs/open.c 已打补丁" || echo "✗ fs/open.c 未打补丁"
+        grep -q "ksu_handle_sys_read" fs/read_write.c && echo "✓ fs/read_write.c 已打补丁" || echo "✗ fs/read_write.c 未打补丁"
+        grep -q "ksu_handle_stat" fs/stat.c && echo "✓ fs/stat.c 已打补丁" || echo "✗ fs/stat.c 未打补丁"
+        grep -q "ksu_handle_sys_reboot" kernel/reboot.c && echo "✓ kernel/reboot.c 已打补丁" || echo "✗ kernel/reboot.c 未打补丁"
+
+        # KernelSU 配置
+        echo "# KernelSU configuration" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # cpufake 模块必需配置
+        echo "# cpufake module support" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_MODULES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_MODULE_UNLOAD=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_MODVERSIONS=n" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG_FORCE is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "# CONFIG_MODULE_SIG_ALL is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KRETPROBES=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 29971)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Check kernel output
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Kernel output file is empty"
+          exit 1
+        fi
+
+    - name: Package kernel module build environment
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        mkdir -p build-env-package
+
+        # 复制核心文件
+        cp out/Module.symvers build-env-package/
+        cp out/.config build-env-package/
+
+        # 复制生成的头文件
+        mkdir -p build-env-package/include/generated
+        cp -r out/include/generated/* build-env-package/include/generated/
+
+        # 复制架构相关头文件
+        mkdir -p build-env-package/arch/arm64/include/generated
+        cp -r out/arch/arm64/include/generated/* build-env-package/arch/arm64/include/generated/
+
+        # 创建说明文件
+        cat > build-env-package/README.txt << 'EOF'
+        内核模块编译环境文件
+        ===================
+
+        内核版本: $(cat out/include/config/kernel.release)
+        编译时间: $(date)
+
+        文件说明:
+        - Module.symvers: 内核符号版本表（必需）
+        - .config: 完整的内核配置文件
+        - include/generated/: 编译生成的配置头文件
+        - arch/arm64/include/generated/: ARM64 架构生成的头文件
+
+        使用方法:
+        1. 解压到内核源码树的 out/ 目录
+        2. 设置环境变量:
+           export KERNELDIR=/path/to/kernel/out
+           export ARCH=arm64
+           export CROSS_COMPILE=aarch64-linux-gnu-
+        3. 在模块目录执行:
+           make -C $KERNELDIR M=$(pwd) modules
+        EOF
+
+        # 打包
+        cd build-env-package
+        tar -czf ../kernel-module-build-env.tar.gz *
+
+    - name: Prepare AnyKernel3 and package
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        sed -i 's/kernel.string=.*/kernel.string=OnePlus 8 Pro KernelSU + cpufake support by ${{ github.actor }}/' AnyKernel3/anykernel.sh
+
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        cd AnyKernel3
+        zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU-cpufake-${{ github.event.inputs.kernel_version }}.zip ./*
+
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v6
+      with:
+        name: Image-KSU-cpufake
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-KSU-cpufake-${{ github.event.inputs.kernel_version }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-*.zip
+
+    - name: Upload kernel module build environment
+      uses: actions/upload-artifact@v6
+      with:
+        name: kernel-module-build-env
+        path: kernel_workspace/android-kernel/kernel-module-build-env.tar.gz
+
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        {
+          echo "RSKSUVER=${{ env.RSKSUVER }}"
+          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          echo "cpufake_support=enabled"
+          echo "build_env_included=yes"
+        } > build-info.txt
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v6
+      with:
+        name: build-info
+        path: kernel_workspace/build-info.txt
